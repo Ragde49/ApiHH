@@ -1,0 +1,835 @@
+openapi: 3.0.3
+info:
+  title: HH API
+  version: 0.1.0
+  description: |
+    Backend de la app móvil HH para la entrega de efectivo en ruta.
+
+    **Autenticación**
+    - **Navegador:** `POST /api/auth/login` responde con la cookie HttpOnly
+      `hh_session` (`__Host-hh_session` cuando `COOKIE_SECURE=true`).
+    - **Android / iOS:** envía `X-Client: hh-app` al hacer login. La respuesta
+      incluye `token` y `expiresIn`; después manda `Authorization: Bearer <token>`.
+
+    Si llega un header `Authorization` inválido, no se usa la cookie como respaldo.
+    Las peticiones con un `Origin` distinto de `FRONTEND_ORIGIN` se rechazan con `403`.
+    Todas las respuestas llevan `Cache-Control: no-store`.
+servers:
+  - url: http://localhost:3001
+    description: Desarrollo local
+tags:
+  - name: Sistema
+    description: Estado del servicio.
+  - name: Autenticación
+    description: Login, cambio obligatorio de contraseña y sesión.
+  - name: Resumen
+    description: Mini corte del efectivo asignado al usuario.
+  - name: Entregas
+    description: Bolsas pendientes, historial y registro de entregas e incidencias.
+
+paths:
+  /api/health:
+    get:
+      tags: [Sistema]
+      summary: Estado del proceso
+      description: Indica que el proceso responde. No comprueba la conexión a SQL Server.
+      operationId: health
+      security: []
+      responses:
+        "200":
+          description: El proceso está vivo.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /api/auth/login:
+    post:
+      tags: [Autenticación]
+      summary: Iniciar sesión
+      description: |
+        Valida al usuario contra `dbo.seg_usuarios`. Si la cuenta exige cambio de
+        contraseña, responde `403` con `PASSWORD_CHANGE_REQUIRED` y no crea sesión.
+        Si ya hay una sesión en la petición, se revoca (rotación).
+        Comparte el límite de 10 intentos por IP cada 15 minutos con `/change-password`.
+      operationId: login
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/XClient"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/SessionCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/InvalidCredentials"
+        "403":
+          description: La cuenta requiere cambio de contraseña, o el origen no está permitido.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/PasswordChangeRequired"
+                  - $ref: "#/components/schemas/Error"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/auth/change-password:
+    post:
+      tags: [Autenticación]
+      summary: Cambio obligatorio de contraseña
+      description: |
+        Solo funciona si la cuenta tiene `RequiereCambioPassword = 1`. Genera un
+        salt y hash nuevos, desactiva la bandera y entrega una sesión normal,
+        igual que el login.
+      operationId: changePassword
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/XClient"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/SessionCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/InvalidCredentials"
+        "403":
+          $ref: "#/components/responses/ForbiddenOrigin"
+        "409":
+          description: La cuenta no requiere cambio de contraseña, o la actualización no se aplicó.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: La cuenta no requiere cambio de contraseña.
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/auth/me:
+    get:
+      tags: [Autenticación]
+      summary: Usuario de la sesión
+      description: Vuelve a comprobar en la base de datos que la cuenta siga activa y desbloqueada.
+      operationId: me
+      responses:
+        "200":
+          description: Usuario autenticado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/auth/logout:
+    post:
+      tags: [Autenticación]
+      summary: Cerrar sesión
+      description: Revoca la sesión (si existe) y borra la cookie. Siempre responde `204`.
+      operationId: logout
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+        - {}
+      responses:
+        "204":
+          description: Sesión revocada.
+        "403":
+          $ref: "#/components/responses/ForbiddenOrigin"
+
+  /api/mobile/summary:
+    get:
+      tags: [Resumen]
+      summary: Resumen y bolsas pendientes
+      description: Combina el mini corte y las bolsas pendientes en una sola llamada para la pantalla principal de la app.
+      operationId: mobileSummary
+      responses:
+        "200":
+          description: Resumen del usuario en sesión.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [summary, pending, today]
+                properties:
+                  summary:
+                    $ref: "#/components/schemas/Summary"
+                  pending:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Delivery"
+                  today:
+                    type: array
+                    description: Igual a `pending`; se mantiene por compatibilidad.
+                    items:
+                      $ref: "#/components/schemas/Delivery"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/cash-cut/today:
+    get:
+      tags: [Resumen]
+      summary: Mini corte
+      description: Efectivo asignado, entregado y por regresar del usuario en sesión.
+      operationId: cashCutToday
+      responses:
+        "200":
+          description: Mini corte.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [summary]
+                properties:
+                  summary:
+                    $ref: "#/components/schemas/Summary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/deliveries/today:
+    get:
+      tags: [Entregas]
+      summary: Bolsas pendientes
+      description: Bolsas sin entrega ni incidencia registrada, de cualquier fecha, ordenadas de la más antigua a la más reciente.
+      operationId: deliveriesToday
+      responses:
+        "200":
+          $ref: "#/components/responses/DeliveryList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/deliveries/history:
+    get:
+      tags: [Entregas]
+      summary: Historial de entregas
+      description: Últimas entregas realizadas (`ENTREGADA`), de la más reciente a la más antigua.
+      operationId: deliveriesHistory
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 30
+      responses:
+        "200":
+          $ref: "#/components/responses/DeliveryList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/deliveries/{id}:
+    get:
+      tags: [Entregas]
+      summary: Detalle de una entrega realizada
+      description: Solo devuelve entregas ya registradas como `ENTREGADA` que estén asignadas al usuario. Incluye la firma en PNG y los metadatos del video.
+      operationId: deliveryDetail
+      parameters:
+        - $ref: "#/components/parameters/DeliveryId"
+      responses:
+        "200":
+          description: Detalle de la entrega.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [delivery]
+                properties:
+                  delivery:
+                    $ref: "#/components/schemas/DeliveryDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/deliveries/{id}/complete:
+    post:
+      tags: [Entregas]
+      summary: Registrar entrega
+      description: |
+        Registra la entrega con importe, receptor, firma y video. La firma se
+        convierte en un PNG de 640×260 que se guarda junto con su SHA-256. Del
+        video solo se guardan los metadatos y el SHA-256.
+      operationId: completeDelivery
+      parameters:
+        - $ref: "#/components/parameters/DeliveryId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompleteDeliveryRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/Created"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForbiddenOrigin"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: La entrega ya fue registrada, o la `idempotencyKey` ya se usó.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Esta entrega ya fue registrada.
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/deliveries/{id}/issue:
+    post:
+      tags: [Entregas]
+      summary: Registrar incidencia (no entregado)
+      description: Inserta un evento `NO_ENTREGADO` en `efectivo.entregas_eventos`.
+      operationId: reportDeliveryIssue
+      parameters:
+        - $ref: "#/components/parameters/DeliveryId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IssueRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/Created"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForbiddenOrigin"
+        "404":
+          description: La entrega no existe, no está asignada al usuario o ya fue entregada.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                message: Entrega no encontrada o ya cerrada.
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+security:
+  - bearerAuth: []
+  - cookieAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "Token opaco de 43 caracteres (base64url) que devuelve el login cuando se envía `X-Client: hh-app`."
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: hh_session
+      description: Cookie HttpOnly, SameSite=Lax. Con `COOKIE_SECURE=true` se llama `__Host-hh_session`.
+
+  parameters:
+    XClient:
+      name: X-Client
+      in: header
+      required: false
+      description: Envía `hh-app` desde Android/iOS para recibir un token Bearer en lugar de la cookie.
+      schema:
+        type: string
+        enum: [hh-app]
+    DeliveryId:
+      name: id
+      in: path
+      required: true
+      description: ID de la entrega (BIGINT). Si no cumple el formato, la API responde `404`.
+      schema:
+        type: string
+        pattern: "^\\d{1,19}$"
+        example: "123"
+
+  responses:
+    SessionCreated:
+      description: |
+        Sesión creada. Desde navegador se manda en `Set-Cookie`; con
+        `X-Client: hh-app` la respuesta incluye `token` y `expiresIn`.
+      headers:
+        Set-Cookie:
+          description: Solo cuando no se envía `X-Client hh-app`.
+          schema:
+            type: string
+            example: hh_session=…; Path=/; HttpOnly; SameSite=Lax
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SessionResponse"
+    DeliveryList:
+      description: Lista de entregas.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [deliveries]
+            properties:
+              deliveries:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Delivery"
+    Created:
+      description: Registro creado.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [ok]
+            properties:
+              ok:
+                type: boolean
+                example: true
+    BadRequest:
+      description: Cuerpo o parámetros inválidos, o JSON mal formado.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: JSON inválido.
+    InvalidCredentials:
+      description: Credenciales incorrectas, o cuenta inactiva o bloqueada. El mensaje es genérico a propósito.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: Usuario o contraseña incorrectos, o cuenta no disponible.
+    Unauthorized:
+      description: Sin sesión, o con sesión expirada o revocada (por ejemplo, porque la cuenta se bloqueó).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: Inicia sesión para continuar.
+    ForbiddenOrigin:
+      description: El `Origin` no coincide con `FRONTEND_ORIGIN`, o es una escritura con `Sec-Fetch-Site cross-site`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: Origen no permitido.
+    NotFound:
+      description: La entrega no existe o no está asignada al usuario.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: Entrega no encontrada.
+    PayloadTooLarge:
+      description: El cuerpo excede 35 MB.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: Solicitud demasiado grande.
+    TooManyRequests:
+      description: Más de 10 intentos en 15 minutos desde la misma IP. Incluye los headers `RateLimit` y `RateLimit-Policy` (draft-8).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: Demasiados intentos. Intenta de nuevo en 15 minutos.
+    ServiceUnavailable:
+      description: Falla al conectar con SQL Server u otro error interno. No se exponen detalles.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: No pudimos conectar con el servicio. Intenta nuevamente.
+
+  schemas:
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+
+    PasswordChangeRequired:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [PASSWORD_CHANGE_REQUIRED]
+        message:
+          type: string
+          example: Debes cambiar tu contraseña para continuar.
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Se le quitan los espacios al inicio y al final.
+          example: usuario
+        password:
+          type: string
+          format: password
+          minLength: 1
+          maxLength: 1024
+
+    ChangePasswordRequest:
+      type: object
+      required: [username, currentPassword, newPassword]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 100
+        currentPassword:
+          type: string
+          format: password
+          minLength: 1
+          maxLength: 1024
+        newPassword:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 128
+          description: Debe ser diferente de `currentPassword`.
+
+    User:
+      type: object
+      required: [id, username, name, email, requiresPasswordChange]
+      properties:
+        id:
+          type: integer
+          example: 1
+        username:
+          type: string
+          example: usuario
+        name:
+          type: string
+          nullable: true
+          example: Nombre Completo
+        email:
+          type: string
+          nullable: true
+          example: usuario@empresa.com
+        requiresPasswordChange:
+          type: boolean
+          example: false
+
+    UserResponse:
+      type: object
+      required: [user]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+
+    SessionResponse:
+      type: object
+      required: [user]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        token:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{43}$"
+          description: Solo con `X-Client hh-app`.
+        expiresIn:
+          type: integer
+          description: Segundos de vida de la sesión. Solo con `X-Client hh-app`.
+          example: 28800
+
+    Summary:
+      type: object
+      required:
+        - assignedAmount
+        - deliveredAmount
+        - returnAmount
+        - totalDeliveries
+        - pendingDeliveries
+        - completedDeliveries
+        - issueDeliveries
+      properties:
+        assignedAmount:
+          type: number
+          example: 15000
+        deliveredAmount:
+          type: number
+          example: 9000
+        returnAmount:
+          type: number
+          description: assignedAmount − deliveredAmount
+          example: 6000
+        totalDeliveries:
+          type: integer
+          example: 5
+        pendingDeliveries:
+          type: integer
+          example: 2
+        completedDeliveries:
+          type: integer
+          example: 3
+        issueDeliveries:
+          type: integer
+          example: 0
+
+    Delivery:
+      type: object
+      required:
+        - id
+        - assignmentId
+        - clientId
+        - clientName
+        - clientRfc
+        - scheduledAmount
+        - deliveredAmount
+        - returnAmount
+        - receiverName
+        - status
+        - issueReason
+        - observations
+        - createdAt
+        - completedAt
+        - eventAt
+      properties:
+        id:
+          type: string
+          description: BIGINT serializado como string.
+          example: "123"
+        assignmentId:
+          type: string
+          example: "45"
+        clientId:
+          type: string
+          example: "678"
+        clientName:
+          type: string
+          nullable: true
+          example: Cliente S.A. de C.V.
+        clientRfc:
+          type: string
+          nullable: true
+          example: XAXX010101000
+        scheduledAmount:
+          type: number
+          example: 3000
+        deliveredAmount:
+          type: number
+          nullable: true
+          example: null
+        returnAmount:
+          type: number
+          description: scheduledAmount − (deliveredAmount ?? 0)
+          example: 3000
+        receiverName:
+          type: string
+          nullable: true
+        status:
+          type: string
+          description: "`PENDIENTE`, `ENTREGADA` o el tipo del último evento (p. ej. `NO_ENTREGADO`)."
+          example: PENDIENTE
+        issueReason:
+          type: string
+          nullable: true
+        observations:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+        eventAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    DeliveryDetail:
+      allOf:
+        - $ref: "#/components/schemas/Delivery"
+        - type: object
+          required: [signature, video]
+          properties:
+            signature:
+              type: object
+              nullable: true
+              required: [mimeType, base64, hashSha256]
+              properties:
+                mimeType:
+                  type: string
+                  example: image/png
+                base64:
+                  type: string
+                  format: byte
+                hashSha256:
+                  type: string
+                  nullable: true
+                  description: SHA-256 en hexadecimal.
+            video:
+              type: object
+              nullable: true
+              required: [id, extension, mimeType, sizeBytes, hashSha256]
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                extension:
+                  type: string
+                  nullable: true
+                  example: .mp4
+                mimeType:
+                  type: string
+                  nullable: true
+                  example: video/mp4
+                sizeBytes:
+                  type: integer
+                  nullable: true
+                  example: 4200000
+                hashSha256:
+                  type: string
+                  nullable: true
+                  description: SHA-256 en hexadecimal.
+
+    Point:
+      type: object
+      required: [x, y]
+      description: Coordenada normalizada (0–1) respecto al lienzo de la firma.
+      properties:
+        x:
+          type: number
+          minimum: 0
+          maximum: 1
+        y:
+          type: number
+          minimum: 0
+          maximum: 1
+
+    CompleteDeliveryRequest:
+      type: object
+      required:
+        - amountDelivered
+        - receiverName
+        - signatureStrokes
+        - videoBase64
+        - videoMimeType
+        - videoSizeBytes
+        - idempotencyKey
+      properties:
+        amountDelivered:
+          type: number
+          minimum: 0
+          maximum: 99999999
+          example: 3000
+        receiverName:
+          type: string
+          minLength: 1
+          maxLength: 400
+          example: Juan Pérez
+        signatureStrokes:
+          type: array
+          description: Trazos de la firma. Al menos uno debe tener 2 o más puntos.
+          minItems: 1
+          items:
+            type: array
+            items:
+              $ref: "#/components/schemas/Point"
+          example:
+            - - { x: 0.1, y: 0.5 }
+              - { x: 0.35, y: 0.42 }
+        videoBase64:
+          type: string
+          format: byte
+          minLength: 1024
+          maxLength: 28000000
+        videoMimeType:
+          type: string
+          enum: [video/mp4, video/quicktime]
+        videoSizeBytes:
+          type: integer
+          minimum: 1024
+          maximum: 21000000
+          example: 4200000
+        observations:
+          type: string
+          maxLength: 2000
+        idempotencyKey:
+          type: string
+          format: uuid
+          description: UUID (v1–v5) generado por el cliente; evita duplicados al reintentar.
+
+    IssueRequest:
+      type: object
+      required: [reason, returnAmount, idempotencyKey]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          example: Cliente cerrado
+        returnAmount:
+          type: number
+          minimum: 0
+          maximum: 99999999
+          example: 3000
+        observations:
+          type: string
+          maxLength: 2000
+        idempotencyKey:
+          type: string
+          format: uuid
