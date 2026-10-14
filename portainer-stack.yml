@@ -8,7 +8,7 @@ services:
     restart: unless-stopped
     environment:
       NODE_ENV: production
-      PORT: "3001"
+      PORT: ${API_PORT:-4001}
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN}
       DB_SERVER: ${DB_SERVER}
       DB_PORT: ${DB_PORT:-1433}
@@ -21,7 +21,7 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
     ports:
-      - "${API_PORT:-3001}:3001"
+      - "${API_PORT:-4001}:${API_PORT:-4001}"
     read_only: true
     tmpfs:
       - /tmp
