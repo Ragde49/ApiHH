@@ -3,7 +3,7 @@
 # nunca se guardan en el repo.
 services:
   api:
-    image: ghcr.io/ragde49/apihh:latest
+    image: ghcr.io/ragde49/apihh:025d18ee7095a559901020b10ff8c2e79c9d1c0e
     init: true
     restart: unless-stopped
     environment:
