@@ -1,0 +1,31 @@
+# Stack para Portainer (Repository → rama production).
+# Los valores ${...} se capturan en Portainer → Environment variables;
+# nunca se guardan en el repo.
+services:
+  api:
+    image: ghcr.io/ragde49/apihh:latest
+    init: true
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN}
+      DB_SERVER: ${DB_SERVER}
+      DB_PORT: ${DB_PORT:-1433}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_ENCRYPT: ${DB_ENCRYPT:-true}
+      DB_TRUST_SERVER_CERTIFICATE: ${DB_TRUST_SERVER_CERTIFICATE:-false}
+      SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES:-480}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
+    ports:
+      - "${API_PORT:-3001}:3001"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

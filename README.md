@@ -397,6 +397,21 @@ docker compose logs -f api
 - Tiene un healthcheck integrado contra `/api/health`.
 - El puerto se publica solo en `127.0.0.1`. Para exponerla, ponla detrás de un proxy inverso con HTTPS y ajusta `TRUST_PROXY_HOPS`.
 
+## Despliegue automático (GitHub Actions + Portainer)
+
+Cada push a `main` despliega solo, sin que GitHub tenga que conectarse a la red local:
+
+```
+push a main ──► GitHub Actions: npm test ──► imagen ghcr.io/ragde49/apihh:latest ──► mueve rama production
+                                                                                          │
+                     Portainer (red local) revisa production por polling ◄────────────────┘
+                     └─► descarga la imagen nueva y recrea el contenedor
+```
+
+- Workflow: [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml). Si las pruebas fallan, no se publica nada.
+- Stack: [`portainer-stack.yml`](portainer-stack.yml). Las variables se capturan en Portainer, no en el repo.
+- Cada imagen también se etiqueta con el SHA del commit (`ghcr.io/ragde49/apihh:<sha>`) para poder regresar a una versión anterior.
+
 ## Pruebas
 
 ```sh
@@ -423,7 +438,9 @@ hh-api/
 │           ├── repository.js      # consultas al esquema efectivo
 │           └── signature.js       # trazos → PNG
 ├── test/auth.test.js
+├── .github/workflows/deploy.yml   # CI/CD: pruebas → imagen GHCR → rama production
 ├── openapi.yaml                   # especificación OpenAPI / Swagger
+├── portainer-stack.yml            # stack de producción para Portainer
 ├── Dockerfile
 ├── compose.yaml
 └── .env.example
