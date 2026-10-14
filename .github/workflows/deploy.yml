@@ -1,6 +1,6 @@
 # Push a main → pruebas → imagen en GHCR → mueve la rama `production`.
 # Portainer (red local) revisa `production` por polling y redespliega
-# descargando la imagen nueva. GitHub nunca se conecta a Portainer.
+# con la imagen etiquetada con el SHA. GitHub nunca se conecta a Portainer.
 name: Deploy
 
 on:
@@ -61,7 +61,12 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      # La imagen ya está publicada; ahora Portainer puede ver el cambio.
-      - run: git push --force origin "${GITHUB_SHA}:refs/heads/production"
+      # Portainer CE no puede forzar el re-pull de :latest, así que production
+      # apunta a la imagen exacta del commit; una etiqueta nueva siempre se descarga.
+      - run: |
+          sed -i "s|image: ${IMAGE}:.*|image: ${IMAGE}:${GITHUB_SHA}|" portainer-stack.yml
+          grep -q "image: ${IMAGE}:${GITHUB_SHA}" portainer-stack.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Despliega ${GITHUB_SHA::7}"
+          git push --force origin HEAD:refs/heads/production
