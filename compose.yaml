@@ -1,0 +1,15 @@
+services:
+  api:
+    build: .
+    init: true
+    env_file: .env
+    ports:
+      - "127.0.0.1:${PORT:-3001}:${PORT:-3001}"
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
